@@ -1,0 +1,23 @@
+cff-version: 1.2.0
+message: "If you find this repository useful, please cite it using the metadata below."
+title: "Latent Space Manipulation and Conditional Latent Diffusion with StyleGAN2"
+type: software
+authors:
+  - family-names: "Özdemir"
+    given-names: "Toprak"
+    affiliation: "Boğaziçi University"
+  - family-names: "Çiyik"
+    given-names: "Hüseyin"
+    affiliation: "Boğaziçi University"
+date-released: 2026-01-06
+url: "https://github.com/toprak-ozdemir/stylegan2-latent-manipulation-and-diffusion"
+repository-code: "https://github.com/toprak-ozdemir/stylegan2-latent-manipulation-and-diffusion"
+license: MIT
+keywords:
+  - StyleGAN2
+  - latent space manipulation
+  - conditional latent diffusion
+  - SDE-Edit
+  - classifier-free guidance
+  - generative adversarial networks
+  - diffusion models

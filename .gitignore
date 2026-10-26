@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# Pretrained weights & large intermediates
+*.pkl
+*.pth
+*.pt
+*.npz
+stylegan2-ada-pytorch/
+results/
+results_diffusion/
+*.zip
+
+# macOS
+.DS_Store
+
+# LaTeX build artifacts
+*.aux
+*.log
+*.out
+*.nav
+*.snm
+*.toc
+*.vrb
+*.fls
+*.fdb_latexmk
+*.synctex.gz
