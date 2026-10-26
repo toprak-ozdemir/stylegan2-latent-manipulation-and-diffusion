@@ -1,0 +1,249 @@
+\documentclass[12pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath, amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{subcaption}
+\usepackage{float}
+\usepackage{booktabs}
+
+\title{\textbf{MATH 482: Project 2 Report} \\ Conditional Latent Diffusion with StyleGAN2}
+\author{
+    \textbf{Toprak Özdemir} \\
+    \textbf{Hüseyin Çiyik}
+}
+\date{Fall 2025}
+
+\begin{document}
+
+\maketitle
+\tableofcontents
+\newpage
+
+\section{Introduction}
+In Project 1, we explored linear manipulation in the latent space of StyleGAN2 ($W$-space) to edit facial attributes. While effective for simple edits, linear interpolation assumes a flat data manifold, which can lead to unnatural distortions when traversing "empty" regions of the latent space.
+
+In this project, we implement a \textbf{Conditional Latent Diffusion Model (LDM)}. Unlike linear interpolation, this probabilistic approach learns the distribution of valid latent vectors. By training a diffusion model directly on the $W$-space vectors, we can perform controlled, non-linear edits (such as adding eyeglasses) while ensuring the modified vector remains on the manifold of realistic faces. This report details our implementation of the Residual MLP architecture, the SDE-Edit sampling process, and an analysis of the trade-off between identity preservation and editing strength.
+
+\section{Methodology}
+ The project has been conducted on Python 3.12, PyTorch 2.8.0 and with Tesla T4 GPUs.
+\subsection{Dataset Preparation}
+Instead of operating on pixels (which would require computationally expensive U-Nets), we operate on the compressed 512-dimensional $W$ space of a pre-trained StyleGAN2 generator.
+\begin{itemize}
+    \item \textbf{Latent Vectors:} We generated 20,000 random latent vectors $w \in \mathbb{R}^{512}$ using the StyleGAN2 mapping network (approximately 15\% of the sample have eyeglasses). The Latent Dataset is uploaded to Kaggle as an input for reproducibility.
+All experiments are performed in StyleGAN’s \textit{W}-space.
+
+    \item \textbf{Attribute Classification:} We used a ResNet-18 classifier (pre-trained on CelebA to detect eyeglasses) to label these vectors based on specific attributes. Our primary target attribute for this project was \textbf{Eyeglasses} (Index 15).
+    
+    \item \textbf{Data Normalization:} To satisfy the standard diffusion assumption of $w \sim \mathcal{N}(0, 1)$, we computed the global mean and standard deviation of our dataset and normalized all vectors before training. This is essential for stable training, as diffusion models assume inputs with approximately Gaussian statistics. The same statistics are used to denormalize edited latents before image synthesis.
+
+\end{itemize}
+
+\subsection{Model Architecture: Residual MLP}
+Since our input data is 1D (vector) rather than 2D (image), we used \textbf{Residual MLP (Multi-Layer Perceptron)} instead of Conv2D.
+\begin{itemize}
+    \item \textbf{Input:} Noisy latent vector $w_t$ (512), Time embedding $t_{emb}$ (256), Context embedding $c_{emb}$ (256).
+    \item \textbf{Time Embeddings:} We implemented \textbf{Sinusoidal Position Embeddings} to map the scalar timestep $t$ to a high-dimensional vector, allowing the network to distinguish between noise levels effectively.
+    \item \textbf{Residual Blocks:} The network consists of series of linear layers with residual connections ($y = x + F(x)$). This is critical for diffusion models to preserve the signal structure throughout the deep network.
+\end{itemize}
+
+\subsection{Training Strategy}
+We trained the model to predict the noise $\epsilon$ added to the latent vector.
+\begin{itemize}
+    \item \textbf{Objective:} Standard MSE Loss: $\mathcal{L} = ||\epsilon - \epsilon_\theta(w_t, t, c)||^2$.
+    \item \textbf{Schedule:} Linear $\beta$ schedule from $10^{-4}$ to $0.02$ over $T=1000$ steps (industry standards established by original DDPM paper).
+    \item \textbf{Classifier-Free Guidance (CFG):} To enable adjustable editing strength, we implemented CFG training. During training, the condition label $c$ was randomly dropped (replaced with a null token) with a probability of $p=0.1$. This forces the model to learn both conditional $P(w|c)$ and unconditional $P(w)$ distributions simultaneously.
+\end{itemize}
+
+\subsection{Sampling: SDE-Edit}
+For manipulation, we implemented the \textbf{SDE-Edit} (Stochastic Differential Editing) method. Unlike deterministic inversion (DDIM), SDE-Edit involves a destructive forward process followed by a stochastic generative reverse process.
+\begin{equation}
+    w_{t-1} = \frac{1}{\sqrt{\alpha_t}} \left( w_t - \frac{1-\alpha_t}{\sqrt{1-\bar{\alpha}_t}} \epsilon_\theta(w_t, t, c) \right) + \sigma_t z
+\end{equation}
+where $z \sim \mathcal{N}(0, I)$ is the explicitly injected Langevin noise. We used this stochasticity to help the model "imagine" new features (like glasses frames) that were not present in the original image.
+
+\section{Experiments and Results}
+ Before the results, it should be noted that the manipulation in this setting is random, so manipulating the same image with different seeds give different results as can be seen from Figure \ref{fig:randomness}. Starting noise level is $200$ and guidance level (CFG) is $2.0$ for all of them.
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.8\linewidth]{results_diffusion/different_glasses.png}
+    \caption{Manipulating the same source image (seed = 200) with different seeds}
+    \label{fig:randomness}
+\end{figure}
+\vspace{4mm}
+\subsection{Task: Virtual Optician}
+Our primary experiment focused on the "Virtual Optician" task: taking a source face without glasses and modifying the latent vector to add eyeglasses. We analyzed the impact of two key hyperparameters: the starting noise level ($t_{start}$) and the guidance scale ($s$). First of all, we have the following matrix demonstrating combinations of different staring noise levels and CFG values. The source seed for the original image is \texttt{200} for all experiments.
+
+\begin{figure}[H]
+    \centering
+\includegraphics[width=\linewidth]{results_diffusion/grid_search_glasses.png} 
+    \caption{Effect of varying starting noise levels $t$ (top to bottom), and varying CFG values (left to right).}
+    \label{fig:matrix}
+\end{figure}
+
+From the figure \ref{fig:matrix}, it is clear that low noise levels (the first row) are the main determinant of identity preservation, even with relatively high CFG values. On the other hand, the model struggles to add eyeglasses if noise is too low $(t=50)$; that is, it cannot manipulate the image properly until CFG value is set to $10.0$.
+
+In the second and third row, the noise level increased a little bit $(t=100,150)$. With these moderate noise level, the images are not being distorted too much and the model can easily hallucinate eyeglasses on the original image with lower CFG values. However, it is obviously worse at preserving the identity in compared to low noise level.
+
+Looking at the last two rows, which has a relatively higher noise level $(t=200,300)$, the identity cannot be preserved even with low guidance. Adding eyeglasses is much easier with higher noise, but the original image changes so much that it cannot be recognized anymore.
+
+After all these observations, we can more deeply investigate the varying effects of noise levels and guidance levels in the following figures.
+
+\subsection{Noise Level Analysis}
+We tested starting the reverse process at different timesteps ($t \in \{50,100, 150, 200,300\}$). \\ A moderate, fixed level of guidance is used in all manipulations (CFG = 3.0).
+
+\begin{figure}[H]
+    \centering
+    \begin{subfigure}[b]{0.3\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{results_diffusion/original_seed200.png} 
+        \caption{Original (seed = 200)}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.3\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{results_diffusion/exp200_noise_t50_cfg3.0.png}
+        \caption{$t=50$}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.3\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{results_diffusion/exp200_noise_t100_cfg3.0.png}
+        \caption{$t=100$}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.3\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{results_diffusion/exp200_noise_t150_cfg3.0.png}
+        \caption{$t=150$}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.3\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{results_diffusion/exp200_noise_t200_cfg3.0.png}
+        \caption{$t=200$}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.3\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{results_diffusion/exp200_noise_t300_cfg3.0.png}
+        \caption{$t=300$}
+    \end{subfigure}
+    \caption{Effects of different noise levels on identity preservation}
+    \label{fig:noise_level}
+\end{figure}
+
+
+\begin{itemize}
+    \item \textbf{Low Noise ($t=50$):} The identity is perfectly preserved, but the glasses often fail to appear or appear as faint "ghost" artifacts. The vector remains too close to the original "no-glasses" state.
+    \item \textbf{Low-Medium Noise ($t=100$):} The identity is starting to change a little bit (eyes looking at different angle, subtle change in light/color), but the glasses do not appear again.
+    \item \textbf{Medium Noise ($t=150$):} A sweet spot. The glasses appear clearly with defined frames, and the person's identity is largely recognizable, even though the identity changed more (face shape, hair changes etc.) compared to the lower noise levels.
+    \item \textbf{Medium-High Noise ($t=200$):} The identity has significantly changed. Skin color is getting warmer and more humanized relative to original image.
+    \item \textbf{High Noise ($t=300$):} The glasses are very realistic, but the facial identity changed completely (e.g., face shape, hair or background changes).
+\end{itemize}
+
+\subsection{Guidance Scale Analysis}
+We utilized Classifier-Free Guidance with the formula $\tilde{\epsilon} = \epsilon_{uncond} + s \cdot (\epsilon_{cond} - \epsilon_{uncond})$. The noise level is set to $t=100$ for all manipulations below.
+
+\begin{figure}[H]
+    \centering
+    \begin{subfigure}[b]{0.3\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{results_diffusion/original_seed570.png} 
+        \caption{Original (seed = 570)}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.3\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{results_diffusion/exp570_guidance_t100_cfg2.0.png}
+        \caption{CFG $=2.0$}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.3\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{results_diffusion/exp570_guidance_t100_cfg3.5.png}
+        \caption{CFG $=3.5$}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.3\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{results_diffusion/exp570_guidance_t100_cfg5.0.png}
+        \caption{CFG $=5.0$}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.3\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{results_diffusion/exp570_guidance_t100_cfg7.0.png}
+        \caption{CFG $=7.0$}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.3\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{results_diffusion/exp570_guidance_t100_cfg10.0.png}
+        \caption{CFG $=10.0$}
+    \end{subfigure}
+    \caption{Effects of different guidance scales on the strength of attribute}
+    \label{fig:guidance_scale}
+\end{figure}
+
+\begin{itemize}
+    \item \textbf{Scale $s=2.0-3.5$:} The edit is weak; glasses are often missing or barely visible.
+    \item \textbf{Scale $s= 5.0$:} The "ghost" frame of the glasses started to appear even though there is not still glasses.
+    \item \textbf{Scale $s = 7.0$:} Sweet spot for this specific experiment. The glasses are robustly generated and clearly visible.
+    \item \textbf{Scale $s=10.0$:} The glasses has become more saturated and expressive, but face shape started to change more.
+\end{itemize}
+
+\section{Discussion}
+
+\subsection{Latent Diffusion vs. Pixel Diffusion (Question 1)}
+Training a diffusion model on the $W$ latent space ($512$ dimensions) offers massive computational advantages over pixel space ($1024 \times 1024 \times 3$ dimensions). 
+\begin{itemize}
+    \item \textbf{Efficiency:} Our MLP is lightweight and trains in minutes, whereas pixel-based diffusion requires days on high-end GPUs.
+    \item \textbf{Semantic Control:} Diffusion in latent space operates on high-level concepts (age, gender, etc.) rather than low-level frequency details. This makes global semantic edits easier but fine-grained local edits (like changing a single pixel) harder. Thus, our model sometimes struggles to add eyeglasses properly, because it is a local semantic attribute. Nevertheless, generating them realistically requires global contextual knowledge (e.g., aligning frames with head pose, matching lighting, and ensuring consistent shadows). Because StyleGAN's $\mathcal{W}$-space captures these entangled semantic dependencies, our Latent Diffusion model can insert eyeglasses that are 3D-consistent with the subject's identity, rather than simply "pasting" pixels over the eyes.
+\end{itemize}
+
+\subsection{The Noise vs. Identity Trade-off (Question 2)}
+A fundamental trade-off observed in our SDE-Edit experiments is between editing capability and identity preservation.
+\begin{itemize}
+    \item Adding more noise (higher $t_{start}$) deletes more information about the original subject. This gives the model the necessary "freedom" to hallucinate new object geometry (like glasses frames) that did not exist before, but also identity-specific features are being corrupted by this noise.
+    \item Therefore, because the reconstruction process is stochastic (due to the added noise $z$), the model fills in the missing information based on the learned distribution, not the specific original face. As $t$ increases, the result drifts further from the source identity towards a "generic" face with glasses, which leads to a trade-off between flexibility and fidelity.
+\end{itemize}
+
+\subsection{Comparison: Linear (Project 1) vs. Diffusion (Project 2) (Question 3)}
+Attribute of project 1 was "smiling" whereas attribute of this project is "eyeglasses", so comparing the results may not be fair in this sense because "eyeglasses" is a more complex and local attribute. Moreover, only $\sim15\%$ of our dataset have glasses, so it is a unbalanced data, which makes editing harder. Nevertheless, our findings are as follows:
+\begin{itemize}
+    \item \textbf{Project 1 (Linear):} Better at \textbf{Identity Preservation}. Since we simply add a vector offset, the base facial structure remains mathematically identical. However, it often produces unrealistic artifacts (e.g., lighting inconsistencies) because the linear path leaves the natural data manifold.
+    \item \textbf{Project 2 (Diffusion):} Superior in \textbf{Realism}. The diffusion process iteratively projects the vector back onto the manifold of valid faces. The generated glasses look physically grounded (correct reflections, shadows). However, it struggles more with identity consistency due to the destructive nature of the noise-denoise process.
+\end{itemize}
+Linear interpolation excels at simple, well-separated attributes (like smiling) because it makes minimal changes to the latent vector. Diffusion theoretically offers more flexibility for complex, multi-modal attributes, but requires careful noise level tuning to balance attribute change vs. identity preservation. In practice, for localized attributes like eyeglasses, diffusion's forward process may inadvertently destroy identity information, making the editing task harder.
+
+
+
+
+
+\subsection{Failure Cases (Question 4)}
+In some cases, diffusion-based manipulation produced distorted faces or failed to add eyeglasses altogether. These failures occur when excessive noise or strong guidance causes the diffusion process to overwrite identity-related latent components. Since \textit{W}-space does not fully disentangle semantic attributes from identity, the model may unintentionally modify facial structure while attempting to enforce the target attribute. On the other hand, low starting noise level and guidance scale level sometimes fail to add eyeglasses even though the non-target attributes started to change at those levels.
+
+\begin{figure}[H]
+    \centering
+    \begin{subfigure}[b]{0.3\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{results_diffusion/original_seed450.png} 
+        \caption{Original (seed = 450)}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.3\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{results_diffusion/failure_identity450.png}
+        \caption{t = $300$, CFG $=3.0$}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.3\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{results_diffusion/failure_monster450.png}
+        \caption{t = $500$, CFG $=15.0$}
+    \end{subfigure}
+    \caption{Examples of Failure Cases}
+    \label{fig:failure}
+\end{figure}
+
+\begin{itemize}
+    \item \textbf{Identity Drift:} As can bee seen from Figure \ref{fig:failure}.b, adding "eyeglasses" (even if it fails to add it) completely changed the person's gender, as these attributes are correlated in the training data (dataset bias).
+    
+    \item \textbf{Artifacts:} If $t_{start}$ and/or guidance scale is too high, the model may generate "mutated" faces, add undesired artifacts and totally distorts the image. See Figure \ref{fig:failure}.c.
+\end{itemize}
+
+
+\section{Conclusion}
+In this project, we successfully implemented a Conditional Latent Diffusion Model to manipulate StyleGAN2 images. By training a Residual MLP on the $W$-latent space and employing SDE-Edit with Classifier-Free Guidance, we achieved realistic, non-linear edits. Our experiments demonstrate that while latent diffusion offers superior realism compared to linear interpolation, careful tuning of the noise level is required to maintain the subject's identity.
+
+\end{document}
